@@ -5,6 +5,8 @@ from prosperity3bt.datamodel import Symbol, Trade
 from prosperity3bt.file_reader import FileReader
 
 LIMITS = {
+    "EMERALDS": 50,
+    "TOMATOES": 50,
     "RAINFOREST_RESIN": 50,
     "KELP": 50,
     "SQUID_INK": 50,
