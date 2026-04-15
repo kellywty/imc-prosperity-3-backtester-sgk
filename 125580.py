@@ -4,6 +4,11 @@ from typing import Any, Optional
 # from data import LIMITS
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 
+LIMITS = {
+    "ASH_COATED_OSMIUM": 30,
+    "INTARIAN_PEPPER_ROOT": 30,
+}
+
 class Logger:
     def __init__(self) -> None:
         self.logs = ""
@@ -122,15 +127,11 @@ logger = Logger()
 
 
 class Trader:
-    ASH_COATED_OSMIUM_LIMIT = 30
     ASH_COATED_OSMIUM_DEFAULT_FAIR_VALUE = 10000
-    ASH_COATED_OSMIUM_POSITION_STEP = 14
-    ASH_COATED_OSMIUM_PASSIVE_SIZE = 8
-    ASH_COATED_OSMIUM_TAKE_SIZE = 20
-    ASH_COATED_OSMIUM_TAKE_EDGE = 2
-    ASH_COATED_OSMIUM_PASSIVE_OFFSET = 5
+    ASH_COATED_OSMIUM_POSITION_STEP = 8
+    ASH_COATED_OSMIUM_PASSIVE_SIZE = 10
+    ASH_COATED_OSMIUM_TAKE_SIZE = 16
 
-    INTARIAN_PEPPER_ROOT_LIMIT = 1_000_000
     INTARIAN_PEPPER_ROOT_DEFAULT_FAIR_VALUE = 12000
     INTARIAN_PEPPER_ROOT_WINDOW = 100
     INTARIAN_PEPPER_ROOT_TREND_THRESHOLD = 6
@@ -203,6 +204,16 @@ class Trader:
         fair_value = intercept + slope * timestamp
         return round(fair_value)
 
+    def update_price_history(self, trader_data: dict, product: str, price: int, window: int) -> list[int]:
+        if "price_history" not in trader_data:
+            trader_data["price_history"] = {}
+        if product not in trader_data["price_history"]:
+            trader_data["price_history"][product] = []
+
+        trader_data["price_history"][product].append(price)
+        trader_data["price_history"][product] = trader_data["price_history"][product][-window:]
+        return trader_data["price_history"][product]
+
     def trade_intarian_pepper_root(
         self,
         order_depth: OrderDepth,
@@ -213,14 +224,46 @@ class Trader:
     ) -> list[Order]:
         orders: list[Order] = []
 
+        best_bid = self.get_best_bid(order_depth)
         best_ask = self.get_best_ask(order_depth)
-        buy_capacity = max(0, limit - position)
+        mid_price = self.get_mid_price(order_depth, self.INTARIAN_PEPPER_ROOT_DEFAULT_FAIR_VALUE)
 
-        if best_ask is not None and buy_capacity > 0:
+        self.update_history(
+            trader_data,
+            "INTARIAN_PEPPER_ROOT",
+            timestamp,
+            mid_price,
+            self.INTARIAN_PEPPER_ROOT_WINDOW,
+        )
+
+        fair_value = self.get_linear_fair_value(
+            trader_data,
+            "INTARIAN_PEPPER_ROOT",
+            timestamp,
+            self.INTARIAN_PEPPER_ROOT_DEFAULT_FAIR_VALUE,
+        )
+
+        buy_capacity = max(0, limit - position)
+        sell_capacity = max(0, limit + position)
+
+        logger.print(
+            f"INTARIAN_PEPPER_ROOT t={timestamp} pos={position} mid={mid_price} fair={fair_value} "
+            f"best_bid={best_bid} best_ask={best_ask}"
+        )
+
+        # Buy dips below trend fair value
+        if best_ask is not None and buy_capacity > 0 and best_ask <= fair_value - 3:
             ask_volume = -order_depth.sell_orders[best_ask]
-            qty = min(ask_volume, buy_capacity)
+            qty = min(ask_volume, buy_capacity, self.INTARIAN_PEPPER_ROOT_TAKE_SIZE)
             if qty > 0:
                 orders.append(Order("INTARIAN_PEPPER_ROOT", best_ask, qty))
+
+        # Only sell to reduce long inventory, not to open shorts
+        elif position > 0 and best_bid is not None and best_bid >= fair_value:
+            bid_volume = order_depth.buy_orders[best_bid]
+            qty = min(bid_volume, position, self.INTARIAN_PEPPER_ROOT_TAKE_SIZE)
+            if qty > 0:
+                orders.append(Order("INTARIAN_PEPPER_ROOT", best_bid, -qty))
 
         return orders
 
@@ -239,17 +282,17 @@ class Trader:
         sell_capacity = max(0, limit + position)
 
         inventory_skew = position // self.ASH_COATED_OSMIUM_POSITION_STEP
-        passive_bid = fair_value - self.ASH_COATED_OSMIUM_PASSIVE_OFFSET - inventory_skew
-        passive_ask = fair_value + self.ASH_COATED_OSMIUM_PASSIVE_OFFSET - inventory_skew
+        passive_bid = fair_value - 1 - inventory_skew
+        passive_ask = fair_value + 1 - inventory_skew
 
-        if best_ask is not None and buy_capacity > 0 and best_ask <= fair_value - self.ASH_COATED_OSMIUM_TAKE_EDGE:
+        if best_ask is not None and buy_capacity > 0 and best_ask <= fair_value - 1:
             ask_volume = -order_depth.sell_orders[best_ask]
             qty = min(ask_volume, buy_capacity, self.ASH_COATED_OSMIUM_TAKE_SIZE)
             if qty > 0:
                 orders.append(Order("ASH_COATED_OSMIUM", best_ask, qty))
                 buy_capacity -= qty
 
-        if best_bid is not None and sell_capacity > 0 and best_bid >= fair_value + self.ASH_COATED_OSMIUM_TAKE_EDGE:
+        if best_bid is not None and sell_capacity > 0 and best_bid >= fair_value + 1:
             bid_volume = order_depth.buy_orders[best_bid]
             qty = min(bid_volume, sell_capacity, self.ASH_COATED_OSMIUM_TAKE_SIZE)
             if qty > 0:
@@ -281,12 +324,7 @@ class Trader:
 
         for product, order_depth in state.order_depths.items():
             position = state.position.get(product, 0)
-            if product == "INTARIAN_PEPPER_ROOT":
-                limit = self.INTARIAN_PEPPER_ROOT_LIMIT
-            elif product == "ASH_COATED_OSMIUM":
-                limit = self.ASH_COATED_OSMIUM_LIMIT
-            else:
-                limit = 0
+            limit = LIMITS.get(product, 0)
 
             if product == "INTARIAN_PEPPER_ROOT":
                 result[product] = self.trade_intarian_pepper_root(
