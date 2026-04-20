@@ -122,9 +122,6 @@ logger = Logger()
 
 
 class Trader:
-    def bid(self):
-        return 12
-
     ASH_COATED_OSMIUM_LIMIT = 80
     ASH_COATED_OSMIUM_DEFAULT_FAIR_VALUE = 10000
 

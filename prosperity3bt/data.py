@@ -5,8 +5,8 @@ from prosperity3bt.datamodel import Symbol, Trade
 from prosperity3bt.file_reader import FileReader
 
 LIMITS = {
-    "ASH_COATED_OSMIUM": 30,
-    "INTARIAN_PEPPER_ROOT": 1_000_000,
+    "ASH_COATED_OSMIUM": 80,
+    "INTARIAN_PEPPER_ROOT": 80,
     "EMERALDS": 50,
     "TOMATOES": 50,
     "RAINFOREST_RESIN": 50,

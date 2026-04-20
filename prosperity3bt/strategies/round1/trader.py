@@ -1,8 +1,8 @@
 import json
 from typing import Any, Optional
 
+# from data import LIMITS
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-
 
 class Logger:
     def __init__(self) -> None:
@@ -102,8 +102,8 @@ class Logger:
 
         while lo <= hi:
             mid = (lo + hi) // 2
-            candidate = value[:mid]
 
+            candidate = value[:mid]
             if len(candidate) < len(value):
                 candidate += "..."
 
@@ -122,25 +122,13 @@ logger = Logger()
 
 
 class Trader:
-    def bid(self):
-        return 12
-
     ASH_COATED_OSMIUM_LIMIT = 80
     ASH_COATED_OSMIUM_DEFAULT_FAIR_VALUE = 10000
-
     ASH_COATED_OSMIUM_POSITION_STEP = 20
-
-    ASH_COATED_OSMIUM_WIDE_OFFSET = 7
-    ASH_COATED_OSMIUM_WIDE_SIZE = 30
-
-    ASH_COATED_OSMIUM_TAKE_SIZE = 15
-    ASH_COATED_OSMIUM_BASE_BUY_EDGE = 3
-    ASH_COATED_OSMIUM_BASE_SELL_EDGE = 3
-
-    ASH_COATED_OSMIUM_FAST_FAIR_WINDOW = 20
-    ASH_COATED_OSMIUM_SLOW_FAIR_WINDOW = 80
-    ASH_COATED_OSMIUM_BUY_SLOW_BUFFER = -1
-    ASH_COATED_OSMIUM_SELL_SLOW_BUFFER = 0
+    ASH_COATED_OSMIUM_PASSIVE_SIZE = 15
+    ASH_COATED_OSMIUM_TAKE_SIZE = 20
+    ASH_COATED_OSMIUM_TAKE_EDGE = 3
+    ASH_COATED_OSMIUM_PASSIVE_OFFSET = 6
 
     INTARIAN_PEPPER_ROOT_LIMIT = 80
     INTARIAN_PEPPER_ROOT_DEFAULT_FAIR_VALUE = 12000
@@ -166,7 +154,7 @@ class Trader:
         if best_ask is not None:
             return best_ask
         return default_fair_value
-
+    
     def update_history(
         self,
         trader_data: dict,
@@ -186,20 +174,34 @@ class Trader:
         trader_data["history"][product]["t"] = trader_data["history"][product]["t"][-window:]
         trader_data["history"][product]["p"] = trader_data["history"][product]["p"][-window:]
 
-    def get_ash_fast_slow_fair_values(self, trader_data: dict) -> tuple[int, int]:
-        history = trader_data.get("history", {}).get("ASH_COATED_OSMIUM", {})
-        prices = history.get("p", [])
 
-        if not prices:
-            base = self.ASH_COATED_OSMIUM_DEFAULT_FAIR_VALUE
-            return base, base
+    def get_linear_fair_value(
+        self,
+        trader_data: dict,
+        product: str,
+        timestamp: int,
+        default_fair_value: int,
+    ) -> int:
+        history = trader_data.get("history", {}).get(product, {})
+        t = history.get("t", [])
+        p = history.get("p", [])
 
-        fast_prices = prices[-self.ASH_COATED_OSMIUM_FAST_FAIR_WINDOW:]
-        slow_prices = prices[-self.ASH_COATED_OSMIUM_SLOW_FAIR_WINDOW:]
+        if len(t) < 5:
+            return default_fair_value
 
-        fast_fair = round(sum(fast_prices) / len(fast_prices))
-        slow_fair = round(sum(slow_prices) / len(slow_prices))
-        return fast_fair, slow_fair
+        n = len(t)
+        mean_t = sum(t) / n
+        mean_p = sum(p) / n
+
+        denom = sum((ti - mean_t) ** 2 for ti in t)
+        if denom == 0:
+            return round(mean_p)
+
+        slope = sum((ti - mean_t) * (pi - mean_p) for ti, pi in zip(t, p)) / denom
+        intercept = mean_p - slope * mean_t
+
+        fair_value = intercept + slope * timestamp
+        return round(fair_value)
 
     def trade_intarian_pepper_root(
         self,
@@ -224,77 +226,53 @@ class Trader:
         order_depth: OrderDepth,
         position: int,
         limit: int,
-        trader_data: dict,
     ) -> list[Order]:
         orders: list[Order] = []
-        product = "ASH_COATED_OSMIUM"
-
         best_bid = self.get_best_bid(order_depth)
         best_ask = self.get_best_ask(order_depth)
-
-        fast_fair, slow_fair = self.get_ash_fast_slow_fair_values(trader_data)
-        fair_value = fast_fair
+        fair_value = self.ASH_COATED_OSMIUM_DEFAULT_FAIR_VALUE
 
         buy_capacity = max(0, limit - position)
         sell_capacity = max(0, limit + position)
 
-        inventory_skew = int(position / self.ASH_COATED_OSMIUM_POSITION_STEP)
+        inventory_skew = position // self.ASH_COATED_OSMIUM_POSITION_STEP
+        passive_bid = fair_value - self.ASH_COATED_OSMIUM_PASSIVE_OFFSET - inventory_skew
+        passive_ask = fair_value + self.ASH_COATED_OSMIUM_PASSIVE_OFFSET - inventory_skew
 
-        wide_bid = fair_value - self.ASH_COATED_OSMIUM_WIDE_OFFSET - inventory_skew
-        wide_ask = fair_value + self.ASH_COATED_OSMIUM_WIDE_OFFSET - inventory_skew
-
-        buy_edge = self.ASH_COATED_OSMIUM_BASE_BUY_EDGE
-        sell_edge = self.ASH_COATED_OSMIUM_BASE_SELL_EDGE
+        # add this block
+        buy_edge = self.ASH_COATED_OSMIUM_TAKE_EDGE
+        sell_edge = self.ASH_COATED_OSMIUM_TAKE_EDGE
 
         if position > 40:
-            buy_edge = 4
-            sell_edge = 1
+            buy_edge = 4   # harder to buy more when already long
+            sell_edge = 1  # easier to sell and reduce long
         elif position < -40:
-            buy_edge = 1
-            sell_edge = 4
+            buy_edge = 1   # easier to buy back when already short
+            sell_edge = 4  # harder to sell more when already short
 
-        if (
-            best_ask is not None
-            and buy_capacity > 0
-            and best_ask <= fast_fair - buy_edge
-            and best_ask <= slow_fair + self.ASH_COATED_OSMIUM_BUY_SLOW_BUFFER
-        ):
+        if best_ask is not None and buy_capacity > 0 and best_ask <= fair_value - buy_edge:
             ask_volume = -order_depth.sell_orders[best_ask]
             qty = min(ask_volume, buy_capacity, self.ASH_COATED_OSMIUM_TAKE_SIZE)
             if qty > 0:
-                orders.append(Order(product, best_ask, qty))
+                orders.append(Order("ASH_COATED_OSMIUM", best_ask, qty))
                 buy_capacity -= qty
 
-        if (
-            best_bid is not None
-            and sell_capacity > 0
-            and best_bid >= fast_fair + sell_edge
-            and best_bid >= slow_fair - self.ASH_COATED_OSMIUM_SELL_SLOW_BUFFER
-        ):
+        if best_bid is not None and sell_capacity > 0 and best_bid >= fair_value + sell_edge:
             bid_volume = order_depth.buy_orders[best_bid]
             qty = min(bid_volume, sell_capacity, self.ASH_COATED_OSMIUM_TAKE_SIZE)
             if qty > 0:
-                orders.append(Order(product, best_bid, -qty))
+                orders.append(Order("ASH_COATED_OSMIUM", best_bid, -qty))
                 sell_capacity -= qty
 
-        wide_buy_size = self.ASH_COATED_OSMIUM_WIDE_SIZE
-        wide_sell_size = self.ASH_COATED_OSMIUM_WIDE_SIZE
-
-        if position > 60:
-            wide_buy_size = 0
-        elif position < -60:
-            wide_sell_size = 0
-
-        if buy_capacity > 0 and wide_buy_size > 0:
-            qty = min(wide_buy_size, buy_capacity)
+        if best_bid is not None and best_ask is not None and buy_capacity > 0 and passive_bid > best_bid and passive_bid < best_ask:
+            qty = min(self.ASH_COATED_OSMIUM_PASSIVE_SIZE, buy_capacity)
             if qty > 0:
-                orders.append(Order(product, wide_bid, qty))
-                buy_capacity -= qty
+                orders.append(Order("ASH_COATED_OSMIUM", passive_bid, qty))
 
-        if sell_capacity > 0 and wide_sell_size > 0:
-            qty = min(wide_sell_size, sell_capacity)
+        if best_bid is not None and best_ask is not None and sell_capacity > 0 and passive_ask < best_ask and passive_ask > best_bid:
+            qty = min(self.ASH_COATED_OSMIUM_PASSIVE_SIZE, sell_capacity)
             if qty > 0:
-                orders.append(Order(product, wide_ask, -qty))
+                orders.append(Order("ASH_COATED_OSMIUM", passive_ask, -qty))
 
         return orders
 
@@ -311,23 +289,12 @@ class Trader:
 
         for product, order_depth in state.order_depths.items():
             position = state.position.get(product, 0)
-
             if product == "INTARIAN_PEPPER_ROOT":
                 limit = self.INTARIAN_PEPPER_ROOT_LIMIT
             elif product == "ASH_COATED_OSMIUM":
                 limit = self.ASH_COATED_OSMIUM_LIMIT
             else:
                 limit = 0
-
-            if product == "ASH_COATED_OSMIUM":
-                mid_price = self.get_mid_price(order_depth, self.ASH_COATED_OSMIUM_DEFAULT_FAIR_VALUE)
-                self.update_history(
-                    trader_data,
-                    product,
-                    state.timestamp,
-                    mid_price,
-                    self.ASH_COATED_OSMIUM_SLOW_FAIR_WINDOW,
-                )
 
             if product == "INTARIAN_PEPPER_ROOT":
                 result[product] = self.trade_intarian_pepper_root(
@@ -338,12 +305,7 @@ class Trader:
                     trader_data,
                 )
             elif product == "ASH_COATED_OSMIUM":
-                result[product] = self.trade_ash_coated_osmium(
-                    order_depth,
-                    position,
-                    limit,
-                    trader_data,
-                )
+                result[product] = self.trade_ash_coated_osmium(order_depth, position, limit)
             else:
                 result[product] = []
 
